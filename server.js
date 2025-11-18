@@ -1,8 +1,8 @@
-// server.js
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const { createClient } = require("@supabase/supabase-js");
+// server.js (ES module version)
+
+import express from "express";
+import cors from "cors";
+import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 
@@ -10,7 +10,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Env vars
+// Env vars (Render provides these)
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
 const PORT = process.env.PORT || 8080;
@@ -98,7 +98,7 @@ app.get("/search/businesses", async (req, res) => {
     if (min_price) query = query.gte("price", Number(min_price));
     if (max_price) query = query.lte("price", Number(max_price));
 
-    // Sort by score (change to rating if you don't have score)
+    // Sort by score (you have this column already)
     query = query.order("score", { ascending: false });
 
     // Limit
