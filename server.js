@@ -1,170 +1,100 @@
-// server.js - KonectFeed API
+// server.js  – KonectFeed API (ESM version)
 
 import express from 'express';
 import cors from 'cors';
-import { createClient } from '@supabase/supabase-js';
+import pkg from '@supabase/supabase-js';
+
+const { createClient } = pkg;
 
 const app = express();
-const port = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8080;
 
-// --- Supabase setup ---
+// Read from Render environment (NOT from .env in GitHub)
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
+const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
 
-if (!supabaseUrl) {
-  throw new Error('SUPABASE_URL env var is required');
-}
-if (!supabaseServiceKey) {
-  throw new Error('SUPABASE_SERVICE_KEY env var is required');
+if (!supabaseUrl || !supabaseKey) {
+  console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_KEY env vars');
+  throw new Error('Supabase URL and service key are required');
 }
 
-const supabase = createClient(supabaseUrl, supabaseServiceKey);
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-// --- Middleware ---
 app.use(cors());
 app.use(express.json());
 
-// --- Health check ---
+// Simple health check
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'konectfeed-api' });
 });
 
-// --- Categories endpoint ---
-// Returns distinct categories from feed_items
-app.get('/categories', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('feed_items')
-      .select('category', { distinct: true })
-      .neq('category', null)
-      .order('category', { ascending: true });
-
-    if (error) {
-      console.error('Error loading categories:', error);
-      return res.status(500).json({ error: 'Failed to load categories' });
-    }
-
-    const categories = (data || []).map((row) => row.category);
-    res.json({ categories });
-  } catch (err) {
-    console.error('Unexpected error in /categories:', err);
-    res.status(500).json({ error: 'Unexpected server error' });
-  }
-});
-
-// --- Main search endpoint ---
-// GET /search/businesses?q=&city=&category=&max_price=&limit=
+/**
+ * GET /search/businesses
+ * Query params:
+ *   q         – search term (e.g. "hydrafacial")
+ *   city      – city name (e.g. "Phoenix")
+ *   category  – category (e.g. "medspa")
+ *   max_price – max price filter (number)
+ *   limit     – max # of results (default 10, max 20)
+ */
 app.get('/search/businesses', async (req, res) => {
   try {
-    const {
-      q,
-      city,
-      category,
-      max_price: maxPriceParam,
-      limit: limitParam,
-    } = req.query;
+    const { q, city, category, max_price, limit } = req.query;
 
-    // limit guardrails
-    let limit = parseInt(limitParam, 10);
-    if (Number.isNaN(limit) || limit <= 0) limit = 5;
-    if (limit > 20) limit = 20;
+    let query = supabase.from('feed_items').select('*');
 
-    // price filter
-    let maxPrice = maxPriceParam ? Number(maxPriceParam) : undefined;
-    if (Number.isNaN(maxPrice)) {
-      maxPrice = undefined;
-    }
-
-    // base select
-    let query = supabase
-      .from('feed_items')
-      .select(
-        `
-        id,
-        business_name,
-        category,
-        subcategory,
-        city,
-        state,
-        address,
-        zip,
-        phone,
-        email,
-        website,
-        rating,
-        reviews_count,
-        offer_title,
-        offer_description,
-        price,
-        min_price,
-        max_price,
-        image_url,
-        buy_url,
-        book_url,
-        tags,
-        is_sponsored,
-        score
-      `
-      )
-      .limit(limit);
-
-    // city filter (case-insensitive equality)
     if (city) {
-      query = query.ilike('city', city);
-      // if you want partial match: query = query.ilike('city', `%${city}%`);
+      query = query.eq('city', city);
     }
 
-    // category filter (case-insensitive equality)
     if (category) {
-      query = query.ilike('category', category);
-      // or partial: query = query.ilike('category', `%${category}%`);
+      query = query.eq('category', category);
     }
 
-    // simple keyword match on offer_title (good for "hydrafacial", "botox", etc.)
-    if (q) {
-      query = query.ilike('offer_title', `%${q}%`);
+    if (max_price) {
+      const mp = Number(max_price);
+      if (!Number.isNaN(mp)) {
+        query = query.lte('price', mp);
+      }
     }
 
-    // price filter: match rows where min_price OR price <= maxPrice
-    if (maxPrice !== undefined) {
-      query = query.or(`min_price.lte.${maxPrice},price.lte.${maxPrice}`);
+    if (q && q.trim()) {
+      const term = `%${q.trim()}%`;
+      // Match on business name, offer title, offer description, or tags
+      query = query.or(
+        [
+          `business_name.ilike.${term}`,
+          `offer_title.ilike.${term}`,
+          `offer_description.ilike.${term}`,
+          `tags.ilike.${term}`
+        ].join(',')
+      );
     }
 
-    // ordering: sponsored first, then score, then rating
+    const safeLimit = Math.min(Number(limit) || 10, 20);
+
     query = query
-      .order('is_sponsored', { ascending: false, nullsFirst: false })
+      .order('is_sponsored', { ascending: false })
       .order('score', { ascending: false, nullsLast: true })
-      .order('rating', { ascending: false, nullsLast: true });
+      .order('rating', { ascending: false, nullsLast: true })
+      .limit(safeLimit);
 
     const { data, error } = await query;
 
     if (error) {
-      console.error('Error in /search/businesses:', error);
+      console.error('Supabase error in /search/businesses:', error);
       return res.status(500).json({ error: 'Failed to search businesses' });
     }
 
     res.json({ results: data ?? [] });
   } catch (err) {
     console.error('Unexpected error in /search/businesses:', err);
-    res.status(500).json({ error: 'Unexpected server error' });
+    res.status(500).json({ error: 'Failed to search businesses' });
   }
 });
 
-// --- Usage tracking endpoint ---
-// POST /usage/track  (used by the GPT for simple analytics)
-app.post('/usage/track', async (req, res) => {
-  try {
-    const event = req.body || {};
-    console.log('Usage event:', JSON.stringify(event));
-    // Future: insert into a Supabase "usage_events" table.
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('Error in /usage/track:', err);
-    res.status(500).json({ error: 'Unexpected server error' });
-  }
+app.listen(PORT, () => {
+  console.log(`KonectFeed API running on port ${PORT}`);
 });
 
-// --- Start server ---
-app.listen(port, () => {
-  console.log(`KonectFeed API listening on port ${port}`);
-});
+export default app;
