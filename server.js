@@ -1,46 +1,50 @@
 import express from "express";
-import morgan from "morgan";
 import cors from "cors";
+import morgan from "morgan";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
-const app = express();
-const PORT = process.env.PORT || 8080;
-
-// ---- Supabase client ----
+// --- Env checks ----------------------------------------------------
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
-  throw new Error("SUPABASE_URL or SUPABASE_*_KEY is missing in environment");
+  throw new Error("SUPABASE_URL or SUPABASE_ANON_KEY is missing in environment");
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ---- Middleware ----
+// --- Express setup -------------------------------------------------
+const app = express();
+const PORT = process.env.PORT || 8080;
+
 app.use(cors());
-app.use(morgan("dev"));
 app.use(express.json());
 
-// Health check
+// If you haven't installed morgan, either run `npm install morgan`
+// or comment out the next line.
+// Simple logging:
+app.use(morgan("tiny"));
+
+// --- Health check --------------------------------------------------
 app.get("/", (req, res) => {
   res.json({ status: "ok", service: "konectfeed-api" });
 });
 
-/**
- * GET /search/businesses
- * Query params:
- *  - q: free-text search (optional)
- *  - city: city filter (optional)
- *  - category: category filter (optional)
- *  - max_price: max price filter (optional)
- *  - limit: number of results (default 10)
- */
+// --- Search endpoint -----------------------------------------------
 app.get("/search/businesses", async (req, res) => {
   try {
-    const { q, city, category, max_price, limit } = req.query;
+    const {
+      q,            // search term (text)
+      city,         // city filter
+      category,     // category filter (medspa, accountant, etc.)
+      max_price,    // numeric price ceiling
+      limit         // max number of rows
+    } = req.query;
+
+    const parsedLimit = Math.min(parseInt(limit || "10", 10) || 10, 20);
 
     let query = supabase
       .from("feed_items")
@@ -54,68 +58,64 @@ app.get("/search/businesses", async (req, res) => {
         state,
         address,
         zip,
-        phone,
         email,
         website,
         rating,
         reviews_count,
         price,
+        min_price,
+        max_price,
         offer_title,
         offer_description,
         image_url,
         buy_url,
         book_url,
-        min_price,
-        max_price,
+        phone,
         tags,
         is_sponsored,
         score
       `
       )
-      // sponsored first, then highest score/rating
-      .order("is_sponsored", { ascending: false })
-      .order("score", { ascending: false })
-      .order("rating", { ascending: false });
+      .limit(parsedLimit);
 
-    // City filter
+    // Basic filters (AND conditions)
     if (city) {
-      query = query.ilike("city", city);
+      query = query.eq("city", city);
     }
 
-    // Category filter
     if (category) {
-      query = query.ilike("category", category);
+      query = query.eq("category", category);
     }
 
-    // Price cap
     if (max_price) {
-      const cap = Number(max_price);
-      if (!Number.isNaN(cap)) {
-        query = query.lte("price", cap);
+      const priceNumber = Number(max_price);
+      if (!Number.isNaN(priceNumber)) {
+        query = query.lte("price", priceNumber);
       }
     }
 
-    // Text search across multiple fields
-    if (q) {
-      const pattern = `%${q}%`;
+    // Text search across several columns
+    if (q && q.trim() !== "") {
+      const term = q.trim();
 
-      // NOTE: use "subcategory" (no underscore) – this matches your actual column name.
-      query = query.or(
-        `
-        business_name.ilike.${pattern},
-        city.ilike.${pattern},
-        category.ilike.${pattern},
-        subcategory.ilike.${pattern},
-        offer_title.ilike.${pattern},
-        offer_description.ilike.${pattern},
-        ARRAY_TO_STRING(tags, ',').ilike.${pattern}
-      `
-      );
+      // IMPORTANT: single-line string, no functions, no newlines
+      const orConditions = [
+        `business_name.ilike.%${term}%`,
+        `city.ilike.%${term}%`,
+        `category.ilike.%${term}%`,
+        `subcategory.ilike.%${term}%`,
+        `offer_title.ilike.%${term}%`,
+        `offer_description.ilike.%${term}%`
+      ].join(",");
+
+      query = query.or(orConditions);
     }
 
-    // Limit
-    const maxResults = limit ? parseInt(limit, 10) : 10;
-    query = query.limit(Number.isNaN(maxResults) ? 10 : maxResults);
+    // Sort: sponsored first, then best score/price
+    query = query
+      .order("is_sponsored", { ascending: false, nullsFirst: false })
+      .order("score", { ascending: false, nullsLast: true })
+      .order("price", { ascending: true, nullsLast: true });
 
     const { data, error } = await query;
 
@@ -131,6 +131,8 @@ app.get("/search/businesses", async (req, res) => {
   }
 });
 
+// --- Start server --------------------------------------------------
 app.listen(PORT, () => {
   console.log(`KonectFeed API running on port ${PORT}`);
+  console.log("Your service is live 🎉");
 });
