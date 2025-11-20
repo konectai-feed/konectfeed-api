@@ -1,56 +1,55 @@
-// server.js
-import express from 'express';
-import cors from 'cors';
-import morgan from 'morgan';
-import 'dotenv/config';
-import { createClient } from '@supabase/supabase-js';
+import express from "express";
+import morgan from "morgan";
+import cors from "cors";
+import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
+
+dotenv.config();
 
 const app = express();
-const port = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8080;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(morgan('tiny'));
+// ---- Supabase client ----
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 
-// Supabase client
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey =
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error('SUPABASE_URL or SUPABASE_*_KEY is missing in environment');
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  throw new Error("SUPABASE_URL or SUPABASE_*_KEY is missing in environment");
 }
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ---- Middleware ----
+app.use(cors());
+app.use(morgan("dev"));
+app.use(express.json());
 
 // Health check
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'konectfeed-api' });
+app.get("/", (req, res) => {
+  res.json({ status: "ok", service: "konectfeed-api" });
 });
 
 /**
  * GET /search/businesses
  * Query params:
- *  - q:         text search (business name, city, category, sub_category)
- *  - city:      city filter
- *  - category:  category filter
- *  - max_price: numeric price ceiling
- *  - limit:     max results (default 10, max 50)
+ *  - q: free-text search (optional)
+ *  - city: city filter (optional)
+ *  - category: category filter (optional)
+ *  - max_price: max price filter (optional)
+ *  - limit: number of results (default 10)
  */
-app.get('/search/businesses', async (req, res) => {
-  const { q, city, category, max_price, limit } = req.query;
-
+app.get("/search/businesses", async (req, res) => {
   try {
-    // Base query
+    const { q, city, category, max_price, limit } = req.query;
+
     let query = supabase
-      .from('feed_items')
+      .from("feed_items")
       .select(
         `
         id,
         business_name,
         category,
-        sub_category,
+        subcategory,
         city,
         state,
         address,
@@ -60,83 +59,78 @@ app.get('/search/businesses', async (req, res) => {
         website,
         rating,
         reviews_count,
+        price,
         offer_title,
         offer_description,
-        price,
-        min_price,
-        max_price,
         image_url,
         buy_url,
         book_url,
+        min_price,
+        max_price,
         tags,
         is_sponsored,
-        scene,
-        headline
-      `,
-        { count: 'exact' }
+        score
+      `
       )
-      .eq('is_active', true)
-      .eq('is_deleted', false);
+      // sponsored first, then highest score/rating
+      .order("is_sponsored", { ascending: false })
+      .order("score", { ascending: false })
+      .order("rating", { ascending: false });
 
     // City filter
     if (city) {
-      query = query.ilike('city', `%${city}%`);
+      query = query.ilike("city", city);
     }
 
     // Category filter
     if (category) {
-      query = query.ilike('category', `%${category}%`);
+      query = query.ilike("category", category);
     }
 
-    // Text search across multiple columns
-    if (q) {
-      const search = q.trim();
-      const pattern = `*${search}*`; // Supabase/PostgREST wildcard pattern
-
-      // IMPORTANT:
-      // - No extra "((" or "))"
-      // - No functions like ARRAY_TO_STRING in this string
-      // - Only column.operator.value segments separated by commas
-      query = query.or(
-        [
-          `business_name.ilike.${pattern}`,
-          `city.ilike.${pattern}`,
-          `category.ilike.${pattern}`,
-          `sub_category.ilike.${pattern}`
-          // Do NOT do ilike on tags (text[]). If you want tags:
-          // `tags.cs.{${search}}`  // requires exact match of tag
-        ].join(',')
-      );
-    }
-
-    // Price filter
+    // Price cap
     if (max_price) {
-      const priceValue = Number(max_price);
-      if (!Number.isNaN(priceValue)) {
-        query = query.lte('price', priceValue);
+      const cap = Number(max_price);
+      if (!Number.isNaN(cap)) {
+        query = query.lte("price", cap);
       }
     }
 
-    // Limit
-    const pageSize = Math.min(parseInt(limit, 10) || 10, 50);
-    query = query.limit(pageSize);
+    // Text search across multiple fields
+    if (q) {
+      const pattern = `%${q}%`;
 
-    // Execute
+      // NOTE: use "subcategory" (no underscore) – this matches your actual column name.
+      query = query.or(
+        `
+        business_name.ilike.${pattern},
+        city.ilike.${pattern},
+        category.ilike.${pattern},
+        subcategory.ilike.${pattern},
+        offer_title.ilike.${pattern},
+        offer_description.ilike.${pattern},
+        ARRAY_TO_STRING(tags, ',').ilike.${pattern}
+      `
+      );
+    }
+
+    // Limit
+    const maxResults = limit ? parseInt(limit, 10) : 10;
+    query = query.limit(Number.isNaN(maxResults) ? 10 : maxResults);
+
     const { data, error } = await query;
 
     if (error) {
-      console.error('Supabase error in /search/businesses:', error);
-      return res.status(500).json({ error: 'Failed to search businesses' });
+      console.error("Supabase error in /search/businesses:", error);
+      return res.status(500).json({ error: "Failed to search businesses" });
     }
 
-    res.json({ results: data || [] });
+    return res.json({ results: data || [] });
   } catch (err) {
-    console.error('Unhandled error in /search/businesses:', err);
-    res.status(500).json({ error: 'Failed to search businesses' });
+    console.error("Unexpected error in /search/businesses:", err);
+    return res.status(500).json({ error: "Failed to search businesses" });
   }
 });
 
-// Start server
-app.listen(port, () => {
-  console.log(`KonectFeed API running on port ${port}`);
+app.listen(PORT, () => {
+  console.log(`KonectFeed API running on port ${PORT}`);
 });
