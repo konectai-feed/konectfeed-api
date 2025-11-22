@@ -1,76 +1,45 @@
-// ------------------------------------------------------
-// KonectFeed API – Clean Full Version
-// ------------------------------------------------------
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
 
-import express from 'express';
-import cors from 'cors';
-import morgan from 'morgan';
-import { createClient } from '@supabase/supabase-js';
+dotenv.config();
 
-// ------------------------------------------------------
-// ENV SETUP (Safe + Debug Logging)
-// ------------------------------------------------------
-
-const SUPABASE_URL = process.env.SUPABASE_URL?.trim() || '';
-const SUPABASE_SERVICE_KEY =
-  process.env.SUPABASE_SERVICE_KEY?.trim() ||
-  process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
-  '';
-
-console.log("🔍 ENV CHECK → URL:", !!SUPABASE_URL, "SERVICE KEY:", !!SUPABASE_SERVICE_KEY);
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  throw new Error("❌ Missing SUPABASE_URL or SUPABASE_SERVICE_KEY");
-}
-
-// Connect Supabase
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-
-// ------------------------------------------------------
-// Express Setup
-// ------------------------------------------------------
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(morgan('dev'));
 
-// ------------------------------------------------------
-// /search/businesses
-// ------------------------------------------------------
+// Load environment variables
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
-/*
-Example:
-https://konectfeed-api.onrender.com/search/businesses?q=botox&city=Phoenix&limit=5
-*/
+if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY");
+}
 
-app.get('/search/businesses', async (req, res) => {
+// Supabase client (service role)
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+
+// -----------------------------
+// SEARCH ENDPOINT
+// -----------------------------
+app.get("/search/businesses", async (req, res) => {
   try {
-    const q = req.query.q?.toLowerCase() ?? '';
-    const city = req.query.city ?? '';
-    const limit = parseInt(req.query.limit) || 10;
+    const { q, city, limit = 10 } = req.query;
 
-    if (!q && !city) {
-      return res.status(400).json({ error: "Missing q or city parameter" });
-    }
-
-    console.log("🔎 SEARCH → q:", q, "city:", city, "limit:", limit);
-
-    // ------------------------------------------------------
-    // FULL-TEXT SEARCH using tsvector column "search_vector"
-    // ------------------------------------------------------
     let query = supabase
       .from("feed_items")
       .select("*")
-      .limit(limit);
+      .limit(Number(limit));
 
-    // Keyword search (tsvector)
+    // Keyword search
     if (q) {
       query = query.textSearch("search_vector", q, {
-        type: "websearch"
+        type: "websearch",
       });
     }
 
-    // City filter (case-insensitive)
+    // City filter
     if (city) {
       query = query.ilike("city", `%${city}%`);
     }
@@ -82,7 +51,24 @@ app.get('/search/businesses', async (req, res) => {
       return res.status(500).json({ error: "Failed to search businesses" });
     }
 
-    // Format output
-    const results = data.map(item => ({
-      business_name: item.business_name,
-      category: item.category,
+    return res.json({ results: data });
+  } catch (err) {
+    console.error("❌ Server error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// -----------------------------
+// ROOT ENDPOINT
+// -----------------------------
+app.get("/", (req, res) => {
+  res.send("KonectFeed API is running");
+});
+
+// -----------------------------
+// START SERVER
+// -----------------------------
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`🚀 KonectFeed API running on port ${PORT}`);
+});
